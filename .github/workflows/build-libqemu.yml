@@ -1,0 +1,234 @@
+name: Build libqemu .so / .dll / .dylib + ROM
+
+# Triggers: push to picsimlab-esp32, or manual dispatch.
+# Builds the patched libqemu-xtensa + libqemu-riscv32 for every host
+# Velxio supports natively (Linux x86_64 + arm64, Windows x86_64, macOS
+# Intel + Apple Silicon) plus the arch-independent ROM blobs, and leaves
+# them as short-lived build artifacts.
+#
+# Nothing here publishes to GitHub. The libraries are GPL-2.0 derivatives
+# of QEMU, and we distribute them only from velxio.dev's gated endpoint,
+# where the corresponding source archive sits beside them -- one place to
+# keep binary and source together, as GPLv2 section 3 requires.
+on:
+  push:
+    branches: [picsimlab-esp32]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # ─── Linux (amd64 + arm64) ────────────────────────────────────────────────
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ubuntu:22.04 (glib 2.72) — QEMU 9.2 requires glib >= 2.66, which
+          # rules out the previous ubuntu:20.04 container (glib 2.64). This
+          # raises the amd64 glibc floor to 2.35 (Ubuntu 22.04+/Debian 12+),
+          # matching what the arm64 build already required.
+          - runner: ubuntu-22.04
+            arch: amd64
+            container: ubuntu:22.04
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            container: ubuntu:22.04
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.container }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -y -q
+          apt-get install -y -q --no-install-recommends \
+            build-essential git wget curl \
+            python3-pip python3-setuptools \
+            ninja-build pkg-config flex bison \
+            libglib2.0-dev libgcrypt-dev libslirp-dev \
+            libpixman-1-dev libfdt-dev zlib1g-dev jq
+          # tomli: required by QEMU 9.2's mkvenv on Python < 3.11 (both
+          # containers ship 3.10 or older) — without it configure dies with
+          # "found no usable tomli, please install it".
+          pip3 install meson==1.2.3 tomli
+          # On Linux, iconv is part of glibc — no separate libiconv exists.
+          # QEMU's configure adds -liconv anyway. Create an empty stub to satisfy the linker.
+          LIBDIR=$(dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null || echo "$(uname -m)-linux-gnu")
+          ar rcs /usr/lib/${LIBDIR}/libiconv.a
+
+      - name: Build libqemu-xtensa.so + libqemu-riscv32.so
+        run: bash build_libqemu-esp32.sh
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp build/libqemu-xtensa.so  out/libqemu-xtensa-${{ matrix.arch }}.so
+          cp build/libqemu-riscv32.so out/libqemu-riscv32-${{ matrix.arch }}.so
+          # ROM files are arch-independent — only include from amd64 job
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            cp pc-bios/esp32-v3-rom.bin       out/
+            cp pc-bios/esp32-v3-rom-app.bin   out/
+            cp pc-bios/esp32c3-rom.bin        out/
+            cp pc-bios/esp32s3_rev0_rom.bin   out/
+          fi
+          ls -lh out/
+
+      # Binaries are NOT published to GitHub. They are distributed only
+      # from velxio.dev's gated download endpoint, together with the
+      # corresponding GPL-2.0 source archive. Pull this artifact and load
+      # it into the asset store with velxio-prod's scripts/upload-binary.sh.
+      #
+      # Retention is deliberately short: the account-wide artifact storage
+      # quota is what drove the previous direct-to-release upload, and 3
+      # days is enough to collect a build without refilling it.
+      - name: Upload build artifact (collect + publish to velxio.dev manually)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libqemu-${{ runner.os }}-${{ runner.arch }}
+          path: out/
+          retention-days: 3
+          if-no-files-found: error
+
+  # ─── Windows (x86_64, MSYS2 MINGW64) ──────────────────────────────────────
+  build-windows:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # UCRT64, not MINGW64: MSYS2 deprecated MINGW64 and dropped its libslirp
+      # package ("target not found: mingw-w64-x86_64-libslirp", 2026-10), which
+      # failed this job before a line of QEMU was compiled. UCRT is part of
+      # Windows 10 and later, the floor Velxio Desktop supports.
+      - name: Set up MSYS2 (UCRT64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            diffutils
+            git
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-libgcrypt
+            mingw-w64-ucrt-x86_64-libiconv
+            mingw-w64-ucrt-x86_64-libslirp
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-pkg-config
+            mingw-w64-ucrt-x86_64-python
+            mingw-w64-ucrt-x86_64-python-distlib
+            mingw-w64-ucrt-x86_64-python-pip
+            mingw-w64-ucrt-x86_64-python-setuptools
+
+      - name: Build libqemu-xtensa.dll + libqemu-riscv32.dll
+        run: bash build_libqemu-esp32-win.sh
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp build/libqemu-xtensa.dll  out/libqemu-xtensa-windows-amd64.dll
+          cp build/libqemu-riscv32.dll out/libqemu-riscv32-windows-amd64.dll
+          ls -lh out/
+
+      # Binaries are NOT published to GitHub. They are distributed only
+      # from velxio.dev's gated download endpoint, together with the
+      # corresponding GPL-2.0 source archive. Pull this artifact and load
+      # it into the asset store with velxio-prod's scripts/upload-binary.sh.
+      #
+      # Retention is deliberately short: the account-wide artifact storage
+      # quota is what drove the previous direct-to-release upload, and 3
+      # days is enough to collect a build without refilling it.
+      - name: Upload build artifact (collect + publish to velxio.dev manually)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libqemu-${{ runner.os }}-${{ runner.arch }}
+          path: out/
+          retention-days: 3
+          if-no-files-found: error
+
+  # ─── macOS Apple Silicon (M1+) ────────────────────────────────────────────
+  # Velxio only targets ARM-based Macs; Intel Mac support was dropped on
+  # purpose (per project owner). build_libqemu-esp32.sh uses GNU sed `-i`
+  # syntax, so we install gnu-sed via brew and put it on PATH ahead of
+  # /usr/bin/sed for the duration of the build. The script itself stays
+  # portable.
+  build-macos:
+    runs-on: macos-14   # Apple Silicon (M1)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (brew)
+        run: |
+          brew install \
+            gnu-sed coreutils \
+            ninja pkg-config meson \
+            glib pixman libgcrypt libslirp
+
+      # Homebrew Python 3.14 doesn't bundle `distlib`, which QEMU's mkvenv.py
+      # needs ("a usable distlib could not be found"). Install via pipx —
+      # cleaner than pip --break-system-packages on the externally-managed
+      # brew Python. mkvenv.py imports distlib from any importable location
+      # so a pipx-managed install works.
+      - name: Ensure distlib is available for QEMU mkvenv
+        run: |
+          # Use the user-level pip which does NOT trigger the
+          # "externally-managed-environment" error on brew Python 3.12+.
+          python3 -m pip install --user --break-system-packages distlib
+          # Also make the user site-packages importable from QEMU's mkvenv.py
+          USER_SITE=$(python3 -c "import site; print(site.getusersitepackages())")
+          echo "PYTHONPATH=$USER_SITE" >> "$GITHUB_ENV"
+          python3 -c "import distlib; print('distlib OK at', distlib.__file__)"
+
+      - name: Build libqemu-xtensa.dylib + libqemu-riscv32.dylib
+        env:
+          # Recent meson builds explicitly resolve compilers per language at
+          # configure time. QEMU's meson.build:4069 references the `objc`
+          # compiler unconditionally on macOS, even though we don't enable
+          # Cocoa. Apple's clang understands Objective-C, so just point both
+          # at clang/clang++ — that satisfies meson without changing the
+          # build script.
+          OBJC: clang
+          OBJCXX: clang++
+        run: |
+          # Put GNU sed first so build_libqemu-esp32.sh's `sed -i` works.
+          export PATH="$(brew --prefix gnu-sed)/libexec/gnubin:$PATH"
+          # On macOS the shared library extension is .dylib but the script
+          # writes -shared -o libqemu-xtensa.so. We let it run, then rename.
+          bash build_libqemu-esp32.sh
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          # The script emits .so on every Unix; rename to .dylib for macOS
+          # so the backend's platform-specific loader finds them.
+          cp build/libqemu-xtensa.so  out/libqemu-xtensa-macos-arm64.dylib
+          cp build/libqemu-riscv32.so out/libqemu-riscv32-macos-arm64.dylib
+          ls -lh out/
+
+      # Binaries are NOT published to GitHub. They are distributed only
+      # from velxio.dev's gated download endpoint, together with the
+      # corresponding GPL-2.0 source archive. Pull this artifact and load
+      # it into the asset store with velxio-prod's scripts/upload-binary.sh.
+      #
+      # Retention is deliberately short: the account-wide artifact storage
+      # quota is what drove the previous direct-to-release upload, and 3
+      # days is enough to collect a build without refilling it.
+      - name: Upload build artifact (collect + publish to velxio.dev manually)
+        uses: actions/upload-artifact@v4
+        with:
+          name: libqemu-${{ runner.os }}-${{ runner.arch }}
+          path: out/
+          retention-days: 3
+          if-no-files-found: error
