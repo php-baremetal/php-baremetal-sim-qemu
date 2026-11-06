@@ -1,0 +1,65 @@
+# php-baremetal: build libqemu from this tree and publish it as a GitHub Release.
+#
+# Push a tag qemu-<something> (e.g. qemu-98580369, the Velxio source commit) or
+# run it by hand with a tag name. The Release carries exactly the asset names
+# php-baremetal-sim's Dockerfile.php-baremetal downloads from QEMU_RELEASE_URL:
+#   libqemu-xtensa-amd64.so  libqemu-riscv32-amd64.so
+#   esp32-v3-rom.bin  esp32-v3-rom-app.bin  esp32c3-rom.bin  esp32s3_rev0_rom.bin
+# and, being this repository's own release, sits next to its GPL-2.0 source.
+name: "php-baremetal: libqemu release"
+
+on:
+  push:
+    tags: ["qemu-*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to create or update (qemu-...)"
+        required: true
+        default: "qemu-98580369"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.repository == 'php-baremetal/php-baremetal-sim-qemu'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build libqemu (Dockerfile.php-baremetal)
+        run: |
+          docker buildx build -f Dockerfile.php-baremetal --target out \
+            --platform linux/amd64 -o type=local,dest=out .
+          ls -l out
+
+      - name: Name the assets
+        run: |
+          set -euo pipefail
+          mkdir dist
+          cp out/libqemu-xtensa.so  dist/libqemu-xtensa-amd64.so
+          cp out/libqemu-riscv32.so dist/libqemu-riscv32-amd64.so
+          cp out/esp32-v3-rom.bin out/esp32-v3-rom-app.bin out/esp32c3-rom.bin out/esp32s3_rev0_rom.bin dist/
+          for f in dist/*.so; do
+            size=$(stat -c%s "$f")
+            [ "$size" -gt 10000000 ] || { echo "$f is only $size bytes: the relink step failed" >&2; exit 1; }
+          done
+          (cd dist && sha256sum -- * > SHA256SUMS && cat SHA256SUMS)
+
+      - name: Publish the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          notes="libqemu built from $(git rev-parse --short HEAD) of this repository (GPL-2.0; the source is this tree at that commit). Used by php-baremetal-sim via QEMU_RELEASE_URL."
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* --title "$TAG" --notes "$notes" --target "$GITHUB_SHA"
+          fi
