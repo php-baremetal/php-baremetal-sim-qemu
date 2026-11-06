@@ -1,0 +1,38 @@
+# php-baremetal: reproducible build of libqemu-xtensa.so + libqemu-riscv32.so.
+#
+# Mirrors the "linux" job of .github/workflows/build-libqemu.yml (the workflow
+# that produced Velxio's distributed binaries). The archive's own
+# Dockerfile.build is stale: it lacks tomli, so QEMU 9.2's mkvenv dies on
+# Ubuntu 22.04 (Python 3.10) with "found no usable tomli".
+#
+#   docker buildx build -f Dockerfile.php-baremetal --platform linux/amd64 \
+#     -o type=local,dest=./out .
+#
+# Output (./out): libqemu-xtensa.so, libqemu-riscv32.so and the 4 ROMs
+# Velxio expects next to them.
+
+FROM ubuntu:22.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update -y -q \
+ && apt-get install -y -q --no-install-recommends \
+      build-essential git wget curl ca-certificates \
+      python3-pip python3-setuptools \
+      ninja-build pkg-config flex bison \
+      libglib2.0-dev libgcrypt-dev libslirp-dev \
+      libpixman-1-dev libfdt-dev zlib1g-dev jq \
+ && pip3 install meson==1.2.3 tomli \
+ && LIBDIR=$(dpkg-architecture -q DEB_HOST_MULTIARCH) \
+ && ar rcs /usr/lib/${LIBDIR}/libiconv.a \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN bash build_libqemu-esp32.sh \
+ && mkdir -p /out \
+ && cp build/libqemu-xtensa.so build/libqemu-riscv32.so /out/ \
+ && cp pc-bios/esp32-v3-rom.bin pc-bios/esp32-v3-rom-app.bin \
+       pc-bios/esp32c3-rom.bin pc-bios/esp32s3_rev0_rom.bin /out/ \
+ && ls -lh /out
+
+FROM scratch AS out
+COPY --from=build /out/ /
