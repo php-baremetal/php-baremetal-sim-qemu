@@ -15,10 +15,16 @@ to emulate the ESP32 / ESP32-S3 / ESP32-C3.
 | Matching binaries | `libqemu-xtensa` 1.2.10 (`QEMU_ASSETS_REV=xtensa-1.2.10` in Velxio's `Dockerfile.standalone`) |
 | Upstream chain | QEMU → `lcgamboa/qemu` (`picsimlab-esp32`) → Velxio fork |
 
-The tree is imported **unmodified**. The only files added by us are this
+The tree was imported unmodified (commit `d7ffec3`). Files added by us: this
 README, `Dockerfile.php-baremetal` (the archive's `Dockerfile.build` is stale:
 it lacks `tomli` and fails on Ubuntu 22.04) and any CI files under
 `.github/workflows/` that are marked as php-baremetal.
+
+### Our changes to the source
+
+| Release | Change |
+|---|---|
+| `qemu-98580369-pbm1` | `hw/xtensa/esp32s3.c`: **I2C_MST stub** at `0x6000E000` on the `esp32s3-picsimlab` machine. `I2C_MST_ANA_CONF0_REG` (+0x40) reports `I2C_MST_BBPLL_CAL_DONE` (bit 24). ESP-IDF v6.1.1 apps call `rtc_clk_bbpll_add_consumer()` at start-up (USB Serial/JTAG connection monitor), which now configures the BBPLL and busy-waits on that bit: with nothing mapped they hung after the `sleep_gpio:` lines, before `main_task: Started on CPU0`. Other offsets read 0, as before. |
 `README.VELXIO-SOURCE.md` (from the archive) lists what Velxio adds over
 `lcgamboa/qemu`, including the `*-picsimlab` machines, which is why an
 upstream clone cannot replace this tree.

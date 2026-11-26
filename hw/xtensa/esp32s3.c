@@ -1181,6 +1181,47 @@ static const MemoryRegionOps esp32s3_picsimlab_sens_ops = {
     .endianness = DEVICE_LITTLE_ENDIAN,
 };
 
+/* ── I2C_MST stub (internal analog I2C master @ 0x6000E000) ──────────────
+ * php-baremetal fork. ESP-IDF v6.1.1 made rtc_clk_bbpll_add_consumer()
+ * (called on the S3 by the USB Serial/JTAG connection monitor's
+ * SECONDARY-stage init, usb_serial_jtag_conn_status_init) power up and
+ * configure the BBPLL when s_cur_pll_freq is still 0, and
+ * rtc_clk_bbpll_configure() busy-waits on I2C_MST_ANA_CONF0_REG bit 24
+ * (I2C_MST_BBPLL_CAL_DONE) with interrupts off. Nothing was mapped here, the
+ * background read 0 forever and every v6.1.1 app hung right after the
+ * "sleep_gpio:" lines, before "main_task: Started on CPU0" (v6.1.0 apps
+ * never took that path). ANA_CONF0 keeps what is written and always reports
+ * the calibration done; every other offset reads 0 and ignores writes, as
+ * the unmapped region did (the ROM's regi2c helpers poll a busy bit there).
+ */
+#define ESP32S3_I2C_MST_BASE           0x6000E000
+#define ESP32S3_I2C_MST_ANA_CONF0      0x40
+#define ESP32S3_I2C_MST_BBPLL_CAL_DONE (1u << 24)
+
+static uint32_t esp32s3_i2c_mst_ana_conf0;
+
+static uint64_t esp32s3_i2c_mst_read(void *opaque, hwaddr addr, unsigned int size)
+{
+    if (addr == ESP32S3_I2C_MST_ANA_CONF0) {
+        return esp32s3_i2c_mst_ana_conf0 | ESP32S3_I2C_MST_BBPLL_CAL_DONE;
+    }
+    return 0;
+}
+
+static void esp32s3_i2c_mst_write(void *opaque, hwaddr addr, uint64_t value,
+                                  unsigned int size)
+{
+    if (addr == ESP32S3_I2C_MST_ANA_CONF0) {
+        esp32s3_i2c_mst_ana_conf0 = (uint32_t) value;
+    }
+}
+
+static const MemoryRegionOps esp32s3_i2c_mst_ops = {
+    .read = esp32s3_i2c_mst_read,
+    .write = esp32s3_i2c_mst_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
 /* LEDC fires this sync IRQ (0x5000 | ch<<8 | duty%) on a duty write; forward
  * it to the host exactly like esp32_picsimlab.c's psync_irq_handler. */
 static void esp32s3_picsimlab_sync_irq(void *opaque, int n, int dir)
@@ -1315,6 +1356,17 @@ static void esp32s3_picsimlab_machine_init(MachineState *machine)
         memory_region_add_subregion_overlap(get_system_memory(),
                                             ESP32S3_PICSIMLAB_SENS_BASE,
                                             sens_mr, 1);
+    }
+
+    /* I2C_MST stub — BBPLL calibration-done flag for ESP-IDF v6.1.1+ apps
+     * (see esp32s3_i2c_mst_ops above). */
+    {
+        MemoryRegion *i2c_mst_mr = g_new0(MemoryRegion, 1);
+        memory_region_init_io(i2c_mst_mr, NULL, &esp32s3_i2c_mst_ops, NULL,
+                              "esp32s3.picsimlab-i2c-mst", 0x100);
+        memory_region_add_subregion_overlap(get_system_memory(),
+                                            ESP32S3_I2C_MST_BASE,
+                                            i2c_mst_mr, 1);
     }
 }
 
